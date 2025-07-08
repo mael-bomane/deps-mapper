@@ -33,7 +33,11 @@ fn main() {
                 if let Ok(content) = fs::read_to_string(path) {
                     if let Ok(toml) = content.parse::<Value>() {
                         // handle normal dependencies
-                        for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                        for section in [
+                            "dependencies",
+                            //"dev-dependencies",
+                            "build-dependencies",
+                        ] {
                             if let Some(deps) = toml.get(section) {
                                 collect_external_deps(&project_path, section, deps, &mut entries);
                             }
