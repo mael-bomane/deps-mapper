@@ -32,22 +32,28 @@ fn main() {
             if visited_projects.insert(project_path.clone()) {
                 if let Ok(content) = fs::read_to_string(path) {
                     if let Ok(toml) = content.parse::<Value>() {
+                        // handle normal dependencies
                         for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
                             if let Some(deps) = toml.get(section) {
-                                collect_dependencies(
+                                collect_external_deps(&project_path, section, deps, &mut entries);
+                            }
+                        }
+
+                        // also handle workspace.dependencies if present
+                        if let Some(workspace) = toml.get("workspace") {
+                            if let Some(ws_deps) = workspace.get("dependencies") {
+                                collect_external_deps(
                                     &project_path,
-                                    section,
-                                    deps,
+                                    "workspace.dependencies",
+                                    ws_deps,
                                     &mut entries,
-                                    &mut visited_projects,
-                                    &path.parent().unwrap_or(Path::new(".")),
                                 );
                             }
                         }
                     }
                 }
 
-                // Parse Cargo.lock
+                // Optional: Collect version from Cargo.lock (not resolving real graph)
                 //let lock_path = path.with_file_name("Cargo.lock");
                 //if lock_path.exists() {
                 //    if let Ok(lock_content) = fs::read_to_string(&lock_path) {
@@ -78,7 +84,7 @@ fn main() {
     match format {
         "json" => {
             println!("{}", serde_json::to_string_pretty(&entries).unwrap());
-            println!("found {} deps !", &entries.len())
+            println!("found {} deps !", &entries.len());
         }
         "csv" => {
             println!("project,section,name,version");
@@ -88,7 +94,7 @@ fn main() {
                     entry.project, entry.section, entry.name, entry.version
                 );
             }
-            println!("found {} deps !", &entries.len())
+            println!("found {} deps !", &entries.len());
         }
         "md" | "markdown" => {
             println!("| Project | Section | Dependency | Version |");
@@ -99,88 +105,57 @@ fn main() {
                     entry.project, entry.section, entry.name, entry.version
                 );
             }
-            println!("found {} deps !", &entries.len())
+            println!("found {} deps !", &entries.len());
         }
         _ => {
             eprintln!(
-                "❌ Unsupported format: '{}'. Use 'json', 'csv', or 'md'.",
+                "❌ Unsupported format: '{}'. Use 'json', 'csv', or 'markdown'.",
                 format
             );
         }
     }
 }
 
-fn collect_dependencies(
-    project_path: &str,
+fn collect_external_deps(
+    project: &str,
     section: &str,
     deps: &Value,
     entries: &mut Vec<DependencyEntry>,
-    visited_paths: &mut HashSet<String>,
-    base_dir: &Path,
 ) {
     if let Some(table) = deps.as_table() {
         for (name, value) in table {
-            let (is_local, is_workspace) = match value {
-                Value::Table(t) => (
-                    t.contains_key("path"),
-                    t.get("workspace")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false),
-                ),
-                _ => (false, false),
+            // Skip local dependencies
+            let is_local = match value {
+                Value::Table(t) => t.contains_key("path"),
+                _ => false,
             };
 
-            if is_local {
-                if let Some(path_str) = value.get("path").and_then(|v| v.as_str()) {
-                    let dep_path = base_dir
-                        .join(path_str)
-                        .canonicalize()
-                        .unwrap_or_else(|_| base_dir.join(path_str));
-                    let cargo_toml_path = dep_path.join("Cargo.toml");
-                    let dep_project_path = cargo_toml_path.display().to_string();
+            let is_workspace = match value {
+                Value::Table(t) => t.get("workspace").and_then(|v| v.as_bool()) == Some(true),
+                _ => false,
+            };
 
-                    if visited_paths.insert(dep_project_path.clone()) && cargo_toml_path.exists() {
-                        if let Ok(dep_content) = fs::read_to_string(&cargo_toml_path) {
-                            if let Ok(dep_toml) = dep_content.parse::<Value>() {
-                                for sec in
-                                    ["dependencies", "dev-dependencies", "build-dependencies"]
-                                {
-                                    if let Some(deps) = dep_toml.get(sec) {
-                                        collect_dependencies(
-                                            &dep_project_path,
-                                            sec,
-                                            deps,
-                                            entries,
-                                            visited_paths,
-                                            &dep_path,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                if is_workspace {
-                    continue; // skip workspace = true entries
-                }
-                let version = match value {
-                    Value::String(v) => v.clone(),
-                    Value::Table(tbl) => tbl
-                        .get("version")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    _ => "unknown".to_string(),
-                };
-
-                entries.push(DependencyEntry {
-                    project: project_path.to_string(),
-                    section: section.to_string(),
-                    name: name.to_string(),
-                    version,
-                });
+            if is_local || is_workspace {
+                continue;
             }
+
+            let version = match value {
+                Value::String(v) => v.clone(),
+                Value::Table(tbl) => tbl
+                    .get("version")
+                    .or_else(|| tbl.get("git")) // allow git deps too
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                _ => "unknown".to_string(),
+            };
+
+            entries.push(DependencyEntry {
+                project: project.to_string(),
+                section: section.to_string(),
+                name: name.to_string(),
+                version,
+            });
         }
     }
 }
